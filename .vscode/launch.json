@@ -2,13 +2,12 @@
   "version": "0.2.0",
   "configurations": [
     {
-      "name": "Photo Import",
-      "type": "cppvsdbg",
+      "name": "Photo Import (Python)",
+      "type": "debugpy",
       "request": "launch",
-      "program": "${workspaceFolder}/photo_import.exe",
+      "program": "${workspaceFolder}/photo_import.py",
       "cwd": "${workspaceFolder}",
-      "preLaunchTask": "Build Photo Import",
-      "console": "internalConsole"
+      "console": "integratedTerminal"
     }
   ]
 }
