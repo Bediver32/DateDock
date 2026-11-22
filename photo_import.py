@@ -9,7 +9,7 @@ import tkinter as tk
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from tkinter import filedialog, font, messagebox, ttk
 
@@ -95,6 +95,13 @@ def dated_folders(destination):
     return sorted(folders)
 
 
+@dataclass
+class QueuedFolder:
+    first: date
+    last: date
+    files: dict[Path, None]
+
+
 def copy_files(destination, selection):
     copied = skipped = 0
     errors = []
@@ -144,7 +151,6 @@ class PhotoImport:
         self.disk = tk.StringVar(value="E:")
         self.status = tk.StringVar()
         self.summary = tk.StringVar()
-        self.merge_preview = tk.StringVar()
         window.title("Импорт файлов")
         window.geometry("1120x570")
         window.minsize(900, 420)
@@ -254,25 +260,28 @@ class PhotoImport:
         self.add_dates_button.pack(side="right", pady=(6, 0))
 
         ttk.Label(
-            desktop_tab, text="Выберите две или больше папок через Ctrl.",
+            desktop_tab, text="Выберите папки с датами. Для выбора нескольких удерживайте Ctrl.",
             style="Muted.TLabel",
         ).pack(anchor="w", pady=(0, 6))
         self.imported_list = self.count_table(desktop_tab, "Папка с датой")
-        self.imported_list.bind("<<TreeviewSelect>>", lambda _: self.update_merge())
-        self.merge_button = ttk.Button(desktop_tab, text="Объединить в очереди",
-                                       command=self.queue_merge)
-        self.merge_button.pack(side="right", pady=(6, 0))
-        ttk.Label(desktop_tab, textvariable=self.merge_preview, style="Muted.TLabel").pack(
-            side="left", pady=(6, 0)
-        )
+        self.imported_list.bind("<<TreeviewSelect>>", lambda _: self.update_desktop_selection())
+        self.add_desktop_button = ttk.Button(desktop_tab, text="В очередь",
+                                             command=self.queue_desktop)
+        self.add_desktop_button.pack(side="right", pady=(6, 0))
 
-        ttk.Label(review, text="Папки будут созданы после запуска импорта.",
+        ttk.Label(review, text="Выберите несколько строк через Ctrl, чтобы объединить.",
                   style="Muted.TLabel").pack(anchor="w", pady=(0, 6))
         self.queue_list = self.count_table(review, "Итоговая папка")
         self.queue_list.bind("<<TreeviewSelect>>", lambda _: self.update_queue_controls())
         self.queue_list.bind("<Delete>", lambda _: self.remove_queued())
-        self.remove_button = ttk.Button(review, text="Убрать из очереди", command=self.remove_queued)
-        self.remove_button.pack(side="left", pady=(6, 0))
+        queue_actions = ttk.Frame(review)
+        queue_actions.pack(fill="x", pady=(6, 0))
+        self.merge_button = ttk.Button(queue_actions, text="Объединить выбранные",
+                                       command=self.merge_queued)
+        self.merge_button.pack(side="left")
+        self.remove_button = ttk.Button(queue_actions, text="Убрать из очереди",
+                                        command=self.remove_queued)
+        self.remove_button.pack(side="right")
         self.copy_button = ttk.Button(review, text="Импортировать очередь",
                                       style="Accent.TButton", command=self.import_queue)
         self.copy_button.pack(side="right", pady=(6, 0))
@@ -379,7 +388,8 @@ class PhotoImport:
         for file in files:
             self.groups[file.modified.date().isoformat()].append(file)
         self.date_list.delete(*old_rows)
-        for index, (key, group) in enumerate(self.groups.items()):
+        for index, key in enumerate(sorted(self.groups)):
+            group = self.groups[key]
             day = group[0].modified.strftime("%d.%m.%y")
             self.date_list.insert("", "end", iid=key, values=(day, len(group)),
                                   tags=("alternate",) if index % 2 else ())
@@ -401,15 +411,22 @@ class PhotoImport:
             return
         for key in self.date_list.selection():
             files = self.groups[key]
-            name = files[0].modified.strftime("%d.%m.%y")
-            self.queue.setdefault(name, {}).update({file.path: None for file in files})
+            day = date.fromisoformat(key)
+            self.add_queued(day, day, (file.path for file in files))
         self.render_queue()
+
+    def add_queued(self, first, last, paths):
+        name = date_range(first, last)
+        row = self.queue.setdefault(name, QueuedFolder(first, last, {}))
+        row.files.update(dict.fromkeys(paths))
+        return name
 
     def render_queue(self):
         selected = set(self.queue_list.selection())
         self.queue_list.delete(*self.queue_list.get_children())
-        for index, (name, files) in enumerate(self.queue.items()):
-            self.queue_list.insert("", "end", iid=name, values=(name, len(files)),
+        rows = sorted(self.queue.items(), key=lambda item: (item[1].first, item[1].last))
+        for index, (name, row) in enumerate(rows):
+            self.queue_list.insert("", "end", iid=name, values=(name, len(row.files)),
                                    tags=("alternate",) if index % 2 else ())
         self.queue_list.selection_set(tuple(selected.intersection(self.queue)))
         self.update_queue_controls()
@@ -417,10 +434,12 @@ class PhotoImport:
     def update_queue_controls(self):
         if self.future is not None:
             return
-        count = sum(map(len, self.queue.values()))
+        count = sum(len(row.files) for row in self.queue.values())
         self.summary.set(f"В очереди: {len(self.queue)} папок · {count} файлов")
         self.copy_button.configure(state="normal" if count else "disabled")
-        self.remove_button.configure(state="normal" if self.queue_list.selection() else "disabled")
+        selection = self.queue_list.selection()
+        self.remove_button.configure(state="normal" if selection else "disabled")
+        self.merge_button.configure(state="normal" if len(selection) >= 2 else "disabled")
 
     def remove_queued(self):
         if self.future is not None:
@@ -428,6 +447,18 @@ class PhotoImport:
         for name in self.queue_list.selection():
             del self.queue[name]
         self.render_queue()
+
+    def merge_queued(self):
+        selected = self.queue_list.selection()
+        if self.future is not None or len(selected) < 2:
+            return
+        rows = [self.queue.pop(name) for name in selected]
+        first = min(row.first for row in rows)
+        last = max(row.last for row in rows)
+        name = self.add_queued(first, last, (path for row in rows for path in row.files))
+        self.render_queue()
+        self.queue_list.selection_set(name)
+        self.queue_list.see(name)
 
     def refresh_imported(self, force=True):
         if self.future is not None:
@@ -454,20 +485,16 @@ class PhotoImport:
             self.imported_list.insert("", "end", iid=folder.name, values=(folder.name, count),
                                       tags=("alternate",) if index % 2 else ())
         self.imported_list.selection_set(tuple(selected.intersection(self.imported)))
-        self.update_merge()
+        self.update_desktop_selection()
 
     def selected_imported(self):
         return sorted(self.imported[key] for key in self.imported_list.selection())
 
-    def update_merge(self):
-        if self.future is not None:
-            return
-        selected = self.selected_imported()
-        enabled = len(selected) >= 2
-        self.merge_button.configure(state="normal" if enabled else "disabled")
-        self.merge_preview.set(
-            date_range(selected[0][0], selected[-1][0]) if enabled else ""
-        )
+    def update_desktop_selection(self):
+        if self.future is None:
+            self.add_desktop_button.configure(
+                state="normal" if self.imported_list.selection() else "disabled"
+            )
 
     def open_output(self):
         try:
@@ -479,29 +506,33 @@ class PhotoImport:
         except OSError as error:
             self.status.set(str(error))
 
-    def queue_merge(self):
+    def queue_desktop(self):
+        if self.future is not None:
+            return
         selected = self.selected_imported()
-        if len(selected) < 2 or self.future is not None:
-            return
-        combined = date_range(selected[0][0], selected[-1][0])
-        files, errors = scan_folders([folder for _, folder in selected])
-        if errors:
-            messagebox.showerror("Не удалось прочитать папки", "\n".join(errors[:8]),
-                                 parent=self.window)
-            return
-        if not files:
+        scanned = []
+        for day, folder in selected:
+            files, errors = scan_folders([folder])
+            if errors:
+                messagebox.showerror("Не удалось прочитать папку", "\n".join(errors[:8]),
+                                     parent=self.window)
+                return
+            if files:
+                scanned.append((day, files))
+        if not scanned:
             self.status.set("В выбранных папках нет файлов.")
             return
-        self.queue.setdefault(combined, {}).update({file.path: None for file in files})
+        for day, files in scanned:
+            self.add_queued(day, day, (file.path for file in files))
         self.render_queue()
 
     def import_queue(self):
-        plan = [(name, path) for name, files in self.queue.items() for path in files]
+        plan = [(name, path) for name, row in self.queue.items() for path in row.files]
         if not plan or self.future is not None:
             return
         for control in (self.copy_button, self.merge_button, self.disk_input, self.refresh_button,
                         self.add_button, self.all_button, self.all_dates_button,
-                        self.remove_button, self.add_dates_button):
+                        self.remove_button, self.add_dates_button, self.add_desktop_button):
             control.configure(state="disabled")
         for tree in (self.folder_list, self.date_list, self.imported_list, self.queue_list):
             tree.state(["disabled"])
