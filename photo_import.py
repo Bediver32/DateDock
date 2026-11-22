@@ -149,6 +149,7 @@ class PhotoImport:
         self.worker = ThreadPoolExecutor(max_workers=1)
         self.future = None
         self.disk = tk.StringVar(value="E:")
+        self.source_path = tk.StringVar()
         self.status = tk.StringVar()
         self.summary = tk.StringVar()
         window.title("Импорт файлов")
@@ -180,6 +181,7 @@ class PhotoImport:
         style.map("Accent.TButton", background=[
             ("disabled", "#252d36"), ("pressed", "#204e7e"), ("active", "#286cab")
         ])
+        style.configure("TEntry", fieldbackground=panel, insertcolor=text)
         style.configure("TCombobox", fieldbackground=panel, background="#303943",
                         foreground=text, insertcolor=text, selectbackground=accent)
         style.map("TCombobox", fieldbackground=[("readonly", panel)])
@@ -212,8 +214,6 @@ class PhotoImport:
         self.disk_input.bind("<Return>", lambda _: self.refresh())
         self.refresh_button = ttk.Button(controls, text="Обновить", command=self.refresh_all)
         self.refresh_button.pack(side="left")
-        self.add_button = ttk.Button(controls, text="Добавить папку…", command=self.add_folder)
-        self.add_button.pack(side="left", padx=6)
         ttk.Button(controls, text="Открыть папку импорта", command=self.open_output).pack(side="right")
         ttk.Separator(body).pack(fill="x", pady=(0, 8))
 
@@ -236,6 +236,17 @@ class PhotoImport:
         desktop_tab = ttk.Frame(tabs, padding=8)
         tabs.add(device_tab, text="С устройства")
         tabs.add(desktop_tab, text="Папки на рабочем столе")
+
+        source_entry = ttk.Frame(device_tab)
+        source_entry.pack(fill="x", pady=(0, 8))
+        ttk.Label(source_entry, text="Путь к исходной папке").pack(anchor="w", pady=(0, 4))
+        self.path_entry = ttk.Entry(source_entry, textvariable=self.source_path)
+        self.path_entry.pack(side="left", fill="x", expand=True)
+        self.path_entry.bind("<Return>", lambda _: self.add_folder())
+        self.add_path_button = ttk.Button(source_entry, text="Добавить", command=self.add_folder)
+        self.add_path_button.pack(side="left", padx=6)
+        self.browse_button = ttk.Button(source_entry, text="Обзор…", command=self.browse_folder)
+        self.browse_button.pack(side="left")
 
         device_tables = ttk.Panedwindow(device_tab, orient="horizontal")
         device_tables.pack(fill="both", expand=True)
@@ -369,14 +380,40 @@ class PhotoImport:
     def select_all(self):
         self.folder_list.selection_set(self.folder_list.get_children())
 
-    def add_folder(self):
-        folder = filedialog.askdirectory(title="Выберите папку с файлами")
+    def browse_folder(self):
+        folder = filedialog.askdirectory(title="Выберите папку с файлами", parent=self.window)
         if folder:
-            path = Path(folder)
-            if path not in self.manual:
-                self.manual.append(path)
-            self.refresh()
-            self.folder_list.selection_add(str(self.folders.index(path)))
+            self.source_path.set(folder)
+            self.add_folder()
+
+    def add_folder(self):
+        if self.future is not None:
+            return
+        value = self.source_path.get().strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+            value = value[1:-1]
+        if not value:
+            self.status.set("Введите путь к исходной папке.")
+            self.path_entry.focus_set()
+            return
+
+        try:
+            path = Path(os.path.expandvars(value)).expanduser().resolve(strict=True)
+            if not path.is_dir():
+                raise NotADirectoryError(value)
+        except (OSError, RuntimeError, ValueError):
+            messagebox.showerror("Исходная папка", f"Не удалось открыть папку:\n{value}",
+                                 parent=self.window)
+            self.path_entry.focus_set()
+            return
+
+        if path not in self.manual:
+            self.manual.append(path)
+        self.source_path.set(str(path))
+        self.refresh()
+        row = str(self.folders.index(path))
+        self.folder_list.selection_add(row)
+        self.folder_list.see(row)
 
     def load_files(self):
         if self.future is not None:
@@ -531,7 +568,8 @@ class PhotoImport:
         if not plan or self.future is not None:
             return
         for control in (self.copy_button, self.merge_button, self.disk_input, self.refresh_button,
-                        self.add_button, self.all_button, self.all_dates_button,
+                        self.path_entry, self.add_path_button, self.browse_button,
+                        self.all_button, self.all_dates_button,
                         self.remove_button, self.add_dates_button, self.add_desktop_button):
             control.configure(state="disabled")
         for tree in (self.folder_list, self.date_list, self.imported_list, self.queue_list):
@@ -548,7 +586,8 @@ class PhotoImport:
             return
         self.progress.stop()
         self.progress.configure(mode="determinate", value=0)
-        for control in (self.disk_input, self.refresh_button, self.add_button, self.all_button, self.all_dates_button):
+        for control in (self.disk_input, self.refresh_button, self.path_entry, self.add_path_button, self.browse_button,
+                        self.all_button, self.all_dates_button):
             control.configure(state="normal")
         for tree in (self.folder_list, self.date_list, self.imported_list, self.queue_list):
             tree.state(["!disabled"])
