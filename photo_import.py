@@ -79,15 +79,25 @@ def date_range(first, last):
     return f"{first:%d.%m.%y}–{last:%d.%m.%y}"
 
 
-def import_plan(files, merge):
-    if not files:
+def import_plan(files):
+    return [(file.modified.strftime("%d.%m.%y"), file.path) for file in files]
+
+
+def dated_folders(destination):
+    if not destination.is_dir():
         return []
-    dates = [file.modified.date() for file in files]
-    combined = date_range(min(dates), max(dates)) if merge else None
-    return [
-        (combined or day.strftime("%d.%m.%y"), file.path)
-        for file, day in zip(files, dates)
-    ]
+    folders = []
+    for folder in destination.iterdir():
+        if not re.fullmatch(r"[0-9]{2}\.[0-9]{2}\.[0-9]{2}", folder.name):
+            continue
+        if not folder.is_dir() or folder.is_symlink():
+            continue
+        try:
+            day = datetime.strptime(folder.name, "%d.%m.%y").date()
+        except ValueError:
+            continue
+        folders.append((day, folder))
+    return sorted(folders)
 
 
 def copy_files(destination, selection):
@@ -220,12 +230,12 @@ class PhotoImport:
 
         footer = ttk.Frame(body)
         footer.pack(fill="x", pady=(14, 0))
-        self.merge_button = ttk.Button(footer, text="Объединить папки",
-                                       command=lambda: self.start_copy(True))
+        self.merge_button = ttk.Button(footer, text="Объединить папки по датам…",
+                                       command=self.choose_merge_folders)
         self.merge_button.pack(side="right")
         self.copy_button = ttk.Button(footer, text="Импортировать по датам",
                                       style="Accent.TButton",
-                                      command=lambda: self.start_copy(False))
+                                      command=lambda: self.start_copy(import_plan(self.visible)))
         self.copy_button.pack(side="right", padx=(12, 8))
         ttk.Label(footer, textvariable=self.status, wraplength=370,
                   style="Muted.TLabel").pack(side="left", fill="x", expand=True)
@@ -325,12 +335,9 @@ class PhotoImport:
                 file.path.name, file.folder.name or str(file.folder),
                 file.modified.strftime("%d.%m.%y %H:%M"), size
             ), tags=("alternate",) if index % 2 else ())
-        sources = {file.folder for file in self.visible}
-        plan = import_plan(self.visible, True) if len(sources) >= 2 else []
-        self.summary.set(f"Файлов: {len(self.visible)}" +
-                         (f"  ·  Папка при объединении: {plan[0][0]}" if plan else ""))
+        self.summary.set(f"Файлов: {len(self.visible)}")
         self.copy_button.configure(state="normal" if self.visible else "disabled")
-        self.merge_button.configure(state="normal" if plan else "disabled")
+        self.merge_button.configure(state="normal")
 
     def open_output(self):
         try:
@@ -342,8 +349,80 @@ class PhotoImport:
         except OSError as error:
             self.status.set(str(error))
 
-    def start_copy(self, merge):
-        plan = import_plan(self.visible, merge)
+    def choose_merge_folders(self):
+        if self.future is not None:
+            return
+        try:
+            folders = dated_folders(desktop())
+        except OSError as error:
+            messagebox.showerror("Объединение папок", str(error), parent=self.window)
+            return
+        if len(folders) < 2:
+            messagebox.showinfo(
+                "Объединение папок",
+                "В папке «Фото с устройства» нужны хотя бы две папки с датами.",
+                parent=self.window,
+            )
+            return
+
+        dialog = tk.Toplevel(self.window)
+        dialog.title("Объединение импортированных папок")
+        dialog.transient(self.window)
+        dialog.minsize(460, 335)
+        body = ttk.Frame(dialog, padding=18)
+        body.pack(fill="both", expand=True)
+        ttk.Label(body, text="Папки на рабочем столе", style="Section.TLabel").pack(anchor="w")
+        ttk.Label(
+            body, text="Выберите две или больше папок. Для выбора используйте Ctrl.",
+            style="Muted.TLabel", wraplength=420,
+        ).pack(anchor="w", pady=(4, 10))
+        choices = self.tree(body, show="tree", selectmode="extended")
+        for index, (_, folder) in enumerate(folders):
+            choices.insert("", "end", iid=str(index), text=folder.name)
+        preview = tk.StringVar(value="Выберите папки, чтобы увидеть диапазон дат.")
+        ttk.Label(body, textvariable=preview, style="Muted.TLabel").pack(anchor="w", pady=8)
+        buttons = ttk.Frame(body)
+        buttons.pack(fill="x")
+        ttk.Button(buttons, text="Отмена", command=dialog.destroy).pack(side="left")
+
+        def selection():
+            return sorted(folders[int(index)] for index in choices.selection())
+
+        def confirm():
+            selected = selection()
+            if len(selected) < 2:
+                return
+            combined = date_range(selected[0][0], selected[-1][0])
+            files, errors = scan_folders([folder for _, folder in selected])
+            if errors:
+                messagebox.showerror("Не удалось прочитать папки", "\n".join(errors[:8]),
+                                     parent=dialog)
+                return
+            if not files:
+                messagebox.showinfo("Объединение папок", "В выбранных папках нет файлов.",
+                                    parent=dialog)
+                return
+            dialog.destroy()
+            self.start_copy([(combined, file.path) for file in files], combined)
+
+        merge = ttk.Button(buttons, text="Объединить", command=confirm,
+                           style="Accent.TButton", state="disabled")
+        merge.pack(side="right")
+
+        def update_preview(_):
+            selected = selection()
+            enabled = len(selected) >= 2
+            merge.configure(state="normal" if enabled else "disabled")
+            preview.set(
+                f"Итоговая папка: {date_range(selected[0][0], selected[-1][0])}"
+                if enabled else "Выберите папки, чтобы увидеть диапазон дат."
+            )
+
+        choices.bind("<<TreeviewSelect>>", update_preview)
+        dialog.grab_set()
+        choices.focus_set()
+
+    def start_copy(self, plan, merged_name=None):
         if not plan or self.future is not None:
             return
         for control in (self.copy_button, self.merge_button, self.disk_input, self.refresh_button,
@@ -353,7 +432,7 @@ class PhotoImport:
         self.status.set(f"Копирование: {len(plan)} файлов…")
         self.progress.start(12)
         self.future = self.worker.submit(lambda: copy_files(desktop(), plan))
-        self.window.after(150, lambda: self.finish(plan[0][0] if merge else None))
+        self.window.after(150, lambda: self.finish(merged_name))
 
     def finish(self, merged_name):
         if not self.future.done():
