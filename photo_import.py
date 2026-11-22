@@ -152,7 +152,12 @@ class PhotoImport:
         self.source_path = tk.StringVar()
         self.status = tk.StringVar()
         self.summary = tk.StringVar()
-        window.title("Импорт файлов")
+        window.title("DateDock · Импорт файлов")
+        try:
+            icon = tk.PhotoImage(file=Path(__file__).with_name("datedock.png"))
+            window.iconphoto(True, icon)
+        except tk.TclError:
+            pass
         window.geometry("1120x570")
         window.minsize(900, 420)
         window.protocol("WM_DELETE_WINDOW", self.close)
@@ -206,7 +211,7 @@ class PhotoImport:
         body.pack(fill="both", expand=True)
         controls = ttk.Frame(body)
         controls.pack(fill="x", pady=(0, 8))
-        ttk.Label(controls, text="Импорт файлов", style="Title.TLabel").pack(side="left", padx=(0, 20))
+        ttk.Label(controls, text="DateDock", style="Title.TLabel").pack(side="left", padx=(0, 20))
         ttk.Label(controls, text="Диск").pack(side="left")
         self.disk_input = ttk.Combobox(controls, textvariable=self.disk, width=16)
         self.disk_input.pack(side="left", padx=6)
