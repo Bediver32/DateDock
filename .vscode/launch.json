@@ -1,0 +1,14 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Photo Import",
+      "type": "cppvsdbg",
+      "request": "launch",
+      "program": "${workspaceFolder}/photo_import.exe",
+      "cwd": "${workspaceFolder}",
+      "preLaunchTask": "Build Photo Import",
+      "console": "internalConsole"
+    }
+  ]
+}
