@@ -6,11 +6,12 @@ import shutil
 import string
 import tempfile
 import tkinter as tk
+from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, font, messagebox, ttk
 
 
 def drives():
@@ -47,9 +48,7 @@ def source_folders(root):
 @dataclass(frozen=True)
 class File:
     path: Path
-    folder: Path
     modified: datetime
-    size: int
 
 
 def scan_folders(folders):
@@ -62,7 +61,7 @@ def scan_folders(folders):
                     if path.is_file():
                         info = path.stat()
                         files[path] = File(
-                            path, folder, datetime.fromtimestamp(info.st_mtime), info.st_size
+                            path, datetime.fromtimestamp(info.st_mtime)
                         )
                 except OSError as error:
                     errors.append(str(error))
@@ -139,114 +138,139 @@ class PhotoImport:
         self.window = window
         self.manual = []
         self.folders = []
-        self.files = []
-        self.visible = []
+        self.groups = {}
+        self.imported = []
+        self.output_key = None
         self.disk_key = None
         self.worker = ThreadPoolExecutor(max_workers=1)
         self.future = None
         self.disk = tk.StringVar(value="E:")
-        self.date_filter = tk.StringVar(value="Все даты")
         self.status = tk.StringVar()
         self.summary = tk.StringVar()
+        self.merge_preview = tk.StringVar()
         window.title("Импорт файлов")
-        window.geometry("1080x650")
-        window.minsize(840, 520)
+        window.geometry("1120x570")
+        window.minsize(900, 420)
         window.protocol("WM_DELETE_WINDOW", self.close)
         self.layout()
         self.refresh()
+        self.refresh_imported()
         self.watch()
 
     def layout(self):
         style = ttk.Style()
         style.theme_use("clam")
-        style.configure(".", font=("Segoe UI", 10), background="#f0f4f8", foreground="#172c43")
-        style.configure("Title.TLabel", font=("Segoe UI", 23, "bold"))
-        style.configure("Section.TLabel", font=("Segoe UI", 12, "bold"))
-        style.configure("Muted.TLabel", foreground="#4a6178")
-        style.configure("TButton", padding=(12, 7))
-        style.configure("Accent.TButton", background="#136d66", foreground="white")
+        family = "Segoe UI" if "Segoe UI" in font.families() else "DejaVu Sans"
+        bg, panel, edge = "#20252c", "#171c22", "#46515d"
+        text, muted, accent = "#edf2f8", "#b1bfce", "#205c9b"
+        self.window.configure(background=bg)
+        style.configure(".", font=(family, 10), background=bg, foreground=text,
+                        bordercolor=edge, lightcolor=edge, darkcolor=edge, arrowcolor=text)
+        style.configure("Title.TLabel", font=(family, 15, "bold"))
+        style.configure("Section.TLabel", font=(family, 10, "bold"))
+        style.configure("Muted.TLabel", foreground=muted)
+        style.configure("TButton", padding=(9, 5), background="#303943")
+        style.map("TButton", background=[("disabled", "#252d36"), ("active", "#3b4651")],
+                  foreground=[("disabled", "#8392a0")])
+        style.configure("Accent.TButton", background=accent)
         style.map("Accent.TButton", background=[
-            ("disabled", "#d8e2e9"), ("pressed", "#10534e"), ("active", "#0e5c55")
-        ], foreground=[("disabled", "#526477")])
-        style.configure("Treeview", background="white", fieldbackground="white", rowheight=30)
-        style.configure("Treeview.Heading", background="#e4ecf4", padding=(8, 6),
-                        font=("Segoe UI", 10, "bold"))
-        style.map("Treeview", background=[("selected", "#136d66")],
-                  foreground=[("selected", "white")])
+            ("disabled", "#252d36"), ("pressed", "#204e7e"), ("active", "#286cab")
+        ])
+        style.configure("TCombobox", fieldbackground=panel, background="#303943",
+                        foreground=text, insertcolor=text, selectbackground=accent)
+        style.map("TCombobox", fieldbackground=[("readonly", panel)])
+        self.window.option_add("*TCombobox*Listbox.background", panel)
+        self.window.option_add("*TCombobox*Listbox.foreground", text)
+        self.window.option_add("*TCombobox*Listbox.selectBackground", accent)
+        style.configure("Treeview", background=panel, fieldbackground=panel,
+                        rowheight=24, borderwidth=1)
+        style.configure("Treeview.Heading", background="#303943", padding=(6, 4),
+                        font=(family, 9, "bold"))
+        style.map("Treeview", background=[("selected", accent)],
+                  foreground=[("selected", "#ffffff")])
+        style.map("Treeview.Heading", background=[("active", "#394652")])
+        style.configure("Vertical.TScrollbar", troughcolor=panel, background="#303943")
+        style.map("Vertical.TScrollbar", background=[("active", "#46515d")])
+        style.configure("Horizontal.TProgressbar", troughcolor=panel, background="#428bd5")
 
-        body = ttk.Frame(self.window, padding=20)
+        body = ttk.Frame(self.window, padding=(12, 8))
         body.pack(fill="both", expand=True)
-        ttk.Label(body, text="Импорт файлов", style="Title.TLabel").pack(anchor="w")
         controls = ttk.Frame(body)
-        controls.pack(fill="x", pady=(12, 18))
+        controls.pack(fill="x", pady=(0, 8))
+        ttk.Label(controls, text="Импорт файлов", style="Title.TLabel").pack(side="left", padx=(0, 20))
         ttk.Label(controls, text="Диск").pack(side="left")
-        self.disk_input = ttk.Combobox(controls, textvariable=self.disk, width=19)
-        self.disk_input.pack(side="left", padx=(8, 10))
+        self.disk_input = ttk.Combobox(controls, textvariable=self.disk, width=16)
+        self.disk_input.pack(side="left", padx=6)
         self.disk_input.bind("<<ComboboxSelected>>", lambda _: self.refresh())
         self.disk_input.bind("<Return>", lambda _: self.refresh())
-        self.refresh_button = ttk.Button(controls, text="Обновить", command=self.refresh)
+        self.refresh_button = ttk.Button(controls, text="Обновить", command=self.refresh_all)
         self.refresh_button.pack(side="left")
         self.add_button = ttk.Button(controls, text="Добавить папку…", command=self.add_folder)
-        self.add_button.pack(side="left", padx=8)
-        self.output_button = ttk.Button(controls, text="Открыть папку импорта", command=self.open_output)
-        self.output_button.pack(side="right")
+        self.add_button.pack(side="left", padx=6)
+        ttk.Button(controls, text="Открыть папку импорта", command=self.open_output).pack(side="right")
+        ttk.Separator(body).pack(fill="x", pady=(0, 8))
 
         panes = ttk.Panedwindow(body, orient="horizontal")
         panes.pack(fill="both", expand=True)
-        sidebar = ttk.Frame(panes, padding=(0, 0, 12, 0))
-        table = ttk.Frame(panes, padding=(12, 0, 0, 0))
-        panes.add(sidebar, weight=1)
-        panes.add(table, weight=3)
-        ttk.Label(sidebar, text="Папки", style="Section.TLabel").pack(anchor="w")
-        ttk.Label(sidebar, text="Ctrl — выбрать несколько папок", style="Muted.TLabel").pack(
-            anchor="w", pady=(4, 10)
-        )
-        self.folder_list = self.tree(sidebar, show="tree", selectmode="extended")
-        self.folder_list.column("#0", width=235, minwidth=145)
-        self.folder_list.bind("<<TreeviewSelect>>", lambda _: self.load_files())
-        self.all_button = ttk.Button(sidebar, text="Выбрать все папки", command=self.select_all)
-        self.all_button.pack(anchor="w", pady=(8, 0))
-
-        header = ttk.Frame(table)
-        header.pack(fill="x", pady=(0, 9))
-        ttk.Label(header, text="Файлы", style="Section.TLabel").pack(side="left")
-        self.filter_box = ttk.Combobox(header, textvariable=self.date_filter, width=13,
-                                       state="readonly")
-        self.filter_box.pack(side="right")
-        self.filter_box.bind("<<ComboboxSelected>>", lambda _: self.render_files())
-        ttk.Label(header, text="Дата изменения").pack(side="right", padx=8)
-        self.file_list = self.tree(table, columns=("name", "folder", "date", "size"),
-                                   show="headings", selectmode="browse")
-        for key, title, width in (
-            ("name", "Имя файла", 240), ("folder", "Папка", 125),
-            ("date", "Изменён", 132), ("size", "Размер", 91),
+        sources = ttk.Frame(panes, padding=(0, 0, 6, 0))
+        dates = ttk.Frame(panes, padding=(6, 0))
+        imported = ttk.Frame(panes, padding=(6, 0, 0, 0))
+        for pane, title, weight in (
+            (sources, "Исходные папки", 2), (dates, "Файлы по датам", 1),
+            (imported, "Импортированные папки", 2),
         ):
-            self.file_list.heading(key, text=title)
-            self.file_list.column(key, width=width, minwidth=65,
-                                  stretch=key in ("name", "folder"),
-                                  anchor="e" if key == "size" else "w")
-        self.file_list.tag_configure("alternate", background="#f3f7fb")
-        ttk.Label(table, textvariable=self.summary, style="Muted.TLabel").pack(anchor="w", pady=6)
+            panes.add(pane, weight=weight)
+            ttk.Label(pane, text=title, style="Section.TLabel").pack(anchor="w", pady=(0, 6))
+
+        self.folder_list = self.tree(sources, show="tree headings", selectmode="extended")
+        self.folder_list.heading("#0", text="Папка", anchor="w")
+        self.folder_list.column("#0", width=300, minwidth=150)
+        self.folder_list.bind("<<TreeviewSelect>>", lambda _: self.load_files())
+        self.all_button = ttk.Button(sources, text="Все папки", command=self.select_all)
+        self.all_button.pack(anchor="w", pady=(6, 0))
+
+        self.date_list = self.tree(dates, columns=("date", "count"),
+                                   show="headings", selectmode="extended")
+        self.date_list.heading("date", text="Дата", anchor="w")
+        self.date_list.heading("count", text="Файлов", anchor="e")
+        self.date_list.column("date", width=125, minwidth=90)
+        self.date_list.column("count", width=73, minwidth=55, anchor="e", stretch=False)
+        self.date_list.bind("<<TreeviewSelect>>", lambda _: self.update_import())
+        self.all_dates_button = ttk.Button(
+            dates, text="Все даты", command=lambda: self.date_list.selection_set(self.date_list.get_children())
+        )
+        self.all_dates_button.pack(side="left", pady=(6, 0))
+        self.copy_button = ttk.Button(dates, text="Импортировать",
+                                      style="Accent.TButton", command=self.import_selected)
+        self.copy_button.pack(side="right", pady=(6, 0))
+
+        self.imported_list = self.tree(imported, columns=("folder", "count"),
+                                       show="headings", selectmode="extended")
+        self.imported_list.heading("folder", text="Папка", anchor="w")
+        self.imported_list.heading("count", text="Файлов", anchor="e")
+        self.imported_list.column("folder", width=190, minwidth=105)
+        self.imported_list.column("count", width=73, minwidth=55, anchor="e", stretch=False)
+        self.imported_list.bind("<<TreeviewSelect>>", lambda _: self.update_merge())
+        self.merge_button = ttk.Button(imported, text="Объединить выбранные",
+                                       style="Accent.TButton", command=self.merge_selected)
+        self.merge_button.pack(side="right", pady=(6, 0))
+        ttk.Label(imported, textvariable=self.merge_preview, style="Muted.TLabel").pack(
+            side="left", pady=(6, 0)
+        )
 
         footer = ttk.Frame(body)
-        footer.pack(fill="x", pady=(14, 0))
-        self.merge_button = ttk.Button(footer, text="Объединить папки по датам…",
-                                       command=self.choose_merge_folders)
-        self.merge_button.pack(side="right")
-        self.copy_button = ttk.Button(footer, text="Импортировать по датам",
-                                      style="Accent.TButton",
-                                      command=lambda: self.start_copy(import_plan(self.visible)))
-        self.copy_button.pack(side="right", padx=(12, 8))
-        ttk.Label(footer, textvariable=self.status, wraplength=370,
-                  style="Muted.TLabel").pack(side="left", fill="x", expand=True)
-        self.progress = ttk.Progressbar(body, mode="indeterminate")
-        self.progress.pack(fill="x", pady=(8, 0))
+        footer.pack(fill="x", pady=(9, 0))
+        ttk.Label(footer, textvariable=self.status, style="Muted.TLabel").pack(side="left")
+        ttk.Label(footer, textvariable=self.summary, style="Muted.TLabel").pack(side="right")
+        self.progress = ttk.Progressbar(body, mode="determinate")
+        self.progress.pack(fill="x", pady=(5, 0))
 
     @staticmethod
     def tree(parent, **options):
         frame = ttk.Frame(parent)
         frame.pack(fill="both", expand=True)
-        tree = ttk.Treeview(frame, height=12, **options)
+        tree = ttk.Treeview(frame, height=10, **options)
+        tree.tag_configure("alternate", background="#1e252d")
         scroll = ttk.Scrollbar(frame, orient="vertical", command=tree.yview)
         tree.configure(yscrollcommand=scroll.set)
         scroll.pack(side="right", fill="y")
@@ -286,14 +310,20 @@ class PhotoImport:
         self.folder_list.delete(*self.folder_list.get_children())
         selection = []
         for index, folder in enumerate(self.folders):
-            self.folder_list.insert("", "end", iid=str(index), text=str(folder))
+            self.folder_list.insert("", "end", iid=str(index), text=str(folder),
+                                    tags=("alternate",) if index % 2 else ())
             if folder in previous or folder not in old_folders:
                 selection.append(str(index))
         self.folder_list.selection_set(selection)
         self.load_files()
 
+    def refresh_all(self):
+        self.refresh()
+        self.refresh_imported()
+
     def watch(self):
         self.refresh(False)
+        self.refresh_imported(False)
         self.window.after(1500, self.watch)
 
     def selected_folders(self):
@@ -314,30 +344,74 @@ class PhotoImport:
     def load_files(self):
         if self.future is not None:
             return
-        self.files, errors = scan_folders(self.selected_folders())
-        dates = sorted({file.modified.date() for file in self.files}, reverse=True)
-        options = ["Все даты", *(day.strftime("%d.%m.%y") for day in dates)]
-        self.filter_box.configure(values=options)
-        if self.date_filter.get() not in options:
-            self.date_filter.set(options[0])
+        old_rows = set(self.date_list.get_children())
+        old_selection = set(self.date_list.selection())
+        files, errors = scan_folders(self.selected_folders())
+        self.groups = defaultdict(list)
+        for file in files:
+            self.groups[file.modified.date().isoformat()].append(file)
+        self.date_list.delete(*old_rows)
+        for index, (key, group) in enumerate(self.groups.items()):
+            day = group[0].modified.strftime("%d.%m.%y")
+            self.date_list.insert("", "end", iid=key, values=(day, len(group)),
+                                  tags=("alternate",) if index % 2 else ())
+        self.date_list.selection_set([
+            key for key in self.groups if key not in old_rows or key in old_selection
+        ])
         if errors:
             self.status.set(f"Не удалось прочитать часть файлов или папок: {len(errors)}")
-        self.render_files()
+        self.update_import()
 
-    def render_files(self):
-        selected = self.date_filter.get()
-        self.visible = [file for file in self.files if selected == "Все даты"
-                        or file.modified.strftime("%d.%m.%y") == selected]
-        self.file_list.delete(*self.file_list.get_children())
-        for index, file in enumerate(self.visible):
-            size = f"{file.size:,}".replace(",", " ") + " Б"
-            self.file_list.insert("", "end", values=(
-                file.path.name, file.folder.name or str(file.folder),
-                file.modified.strftime("%d.%m.%y %H:%M"), size
-            ), tags=("alternate",) if index % 2 else ())
-        self.summary.set(f"Файлов: {len(self.visible)}")
-        self.copy_button.configure(state="normal" if self.visible else "disabled")
-        self.merge_button.configure(state="normal")
+    def update_import(self):
+        if self.future is not None:
+            return
+        count = sum(len(self.groups[key]) for key in self.date_list.selection())
+        self.summary.set(f"К импорту: {count} файлов")
+        self.copy_button.configure(state="normal" if count else "disabled")
+
+    def import_selected(self):
+        files = [file for key in self.date_list.selection() for file in self.groups[key]]
+        self.start_copy(import_plan(files))
+
+    def refresh_imported(self, force=True):
+        if self.future is not None:
+            return
+        try:
+            destination = desktop()
+            stamp = destination.stat().st_mtime_ns if destination.exists() else None
+            key = (destination, stamp)
+            if not force and key == self.output_key:
+                return
+            folders = dated_folders(destination)
+        except OSError as error:
+            self.status.set(str(error))
+            return
+        self.output_key = key
+        selected = set(self.imported_list.selection())
+        self.imported_list.delete(*self.imported_list.get_children())
+        self.imported = {folder.name: (day, folder) for day, folder in folders}
+        for index, (_, folder) in enumerate(folders):
+            try:
+                count = sum(path.is_file() for path in folder.iterdir())
+            except OSError:
+                count = "—"
+            self.imported_list.insert("", "end", iid=folder.name, values=(folder.name, count),
+                                      tags=("alternate",) if index % 2 else ())
+        self.imported_list.selection_set(tuple(selected.intersection(self.imported)))
+        self.update_merge()
+
+    def selected_imported(self):
+        return sorted(self.imported[key] for key in self.imported_list.selection())
+
+    def update_merge(self):
+        if self.future is not None:
+            return
+        selected = self.selected_imported()
+        enabled = len(selected) >= 2
+        self.merge_button.configure(state="normal" if enabled else "disabled")
+        self.merge_preview.set(
+            date_range(selected[0][0], selected[-1][0]) if enabled else "Ctrl — несколько папок"
+        )
 
     def open_output(self):
         try:
@@ -349,87 +423,31 @@ class PhotoImport:
         except OSError as error:
             self.status.set(str(error))
 
-    def choose_merge_folders(self):
-        if self.future is not None:
+    def merge_selected(self):
+        selected = self.selected_imported()
+        if len(selected) < 2 or self.future is not None:
             return
-        try:
-            folders = dated_folders(desktop())
-        except OSError as error:
-            messagebox.showerror("Объединение папок", str(error), parent=self.window)
+        combined = date_range(selected[0][0], selected[-1][0])
+        files, errors = scan_folders([folder for _, folder in selected])
+        if errors:
+            messagebox.showerror("Не удалось прочитать папки", "\n".join(errors[:8]),
+                                 parent=self.window)
             return
-        if len(folders) < 2:
-            messagebox.showinfo(
-                "Объединение папок",
-                "В папке «Фото с устройства» нужны хотя бы две папки с датами.",
-                parent=self.window,
-            )
+        if not files:
+            self.status.set("В выбранных папках нет файлов.")
             return
-
-        dialog = tk.Toplevel(self.window)
-        dialog.title("Объединение импортированных папок")
-        dialog.transient(self.window)
-        dialog.minsize(460, 335)
-        body = ttk.Frame(dialog, padding=18)
-        body.pack(fill="both", expand=True)
-        ttk.Label(body, text="Папки на рабочем столе", style="Section.TLabel").pack(anchor="w")
-        ttk.Label(
-            body, text="Выберите две или больше папок. Для выбора используйте Ctrl.",
-            style="Muted.TLabel", wraplength=420,
-        ).pack(anchor="w", pady=(4, 10))
-        choices = self.tree(body, show="tree", selectmode="extended")
-        for index, (_, folder) in enumerate(folders):
-            choices.insert("", "end", iid=str(index), text=folder.name)
-        preview = tk.StringVar(value="Выберите папки, чтобы увидеть диапазон дат.")
-        ttk.Label(body, textvariable=preview, style="Muted.TLabel").pack(anchor="w", pady=8)
-        buttons = ttk.Frame(body)
-        buttons.pack(fill="x")
-        ttk.Button(buttons, text="Отмена", command=dialog.destroy).pack(side="left")
-
-        def selection():
-            return sorted(folders[int(index)] for index in choices.selection())
-
-        def confirm():
-            selected = selection()
-            if len(selected) < 2:
-                return
-            combined = date_range(selected[0][0], selected[-1][0])
-            files, errors = scan_folders([folder for _, folder in selected])
-            if errors:
-                messagebox.showerror("Не удалось прочитать папки", "\n".join(errors[:8]),
-                                     parent=dialog)
-                return
-            if not files:
-                messagebox.showinfo("Объединение папок", "В выбранных папках нет файлов.",
-                                    parent=dialog)
-                return
-            dialog.destroy()
-            self.start_copy([(combined, file.path) for file in files], combined)
-
-        merge = ttk.Button(buttons, text="Объединить", command=confirm,
-                           style="Accent.TButton", state="disabled")
-        merge.pack(side="right")
-
-        def update_preview(_):
-            selected = selection()
-            enabled = len(selected) >= 2
-            merge.configure(state="normal" if enabled else "disabled")
-            preview.set(
-                f"Итоговая папка: {date_range(selected[0][0], selected[-1][0])}"
-                if enabled else "Выберите папки, чтобы увидеть диапазон дат."
-            )
-
-        choices.bind("<<TreeviewSelect>>", update_preview)
-        dialog.grab_set()
-        choices.focus_set()
+        self.start_copy([(combined, file.path) for file in files], combined)
 
     def start_copy(self, plan, merged_name=None):
         if not plan or self.future is not None:
             return
         for control in (self.copy_button, self.merge_button, self.disk_input, self.refresh_button,
-                        self.add_button, self.filter_box, self.all_button):
+                        self.add_button, self.all_button, self.all_dates_button):
             control.configure(state="disabled")
-        self.folder_list.state(["disabled"])
+        for tree in (self.folder_list, self.date_list, self.imported_list):
+            tree.state(["disabled"])
         self.status.set(f"Копирование: {len(plan)} файлов…")
+        self.progress.configure(mode="indeterminate")
         self.progress.start(12)
         self.future = self.worker.submit(lambda: copy_files(desktop(), plan))
         self.window.after(150, lambda: self.finish(merged_name))
@@ -439,12 +457,14 @@ class PhotoImport:
             self.window.after(150, lambda: self.finish(merged_name))
             return
         self.progress.stop()
-        for control in (self.disk_input, self.refresh_button, self.add_button, self.all_button):
+        self.progress.configure(mode="determinate", value=0)
+        for control in (self.disk_input, self.refresh_button, self.add_button, self.all_button, self.all_dates_button):
             control.configure(state="normal")
-        self.filter_box.configure(state="readonly")
-        self.folder_list.state(["!disabled"])
+        for tree in (self.folder_list, self.date_list, self.imported_list):
+            tree.state(["!disabled"])
         future, self.future = self.future, None
         self.load_files()
+        self.refresh_imported()
         try:
             copied, skipped, errors = future.result()
             prefix = f"{merged_name} · " if merged_name and (copied or skipped) else ""
